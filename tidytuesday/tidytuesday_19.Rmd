@@ -1,0 +1,192 @@
+---
+title: "TidyTuesday Projects - Week 19"
+author: "Gustavo"
+date: "2022-12-25"
+output: 
+  html_document:
+    number_sections: true
+    toc: true
+    theme: journal
+    highlight: pygments
+---
+
+```{r setup, include=FALSE, message= FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+# New York Times Best Selling Books
+
+This dataset is from the tidytuesday project week 19 and is about the best selling books on new york times. The process done here is based on Julia Silge's notebook found [here](https://juliasilge.com/blog/nyt-bestsellers/) Here is a glimpse of the data:
+
+```{r}
+# Loading libraries
+library(tidyverse)
+
+# Loading data
+nyt_titles <- readr::read_tsv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-05-10/nyt_titles.tsv')
+
+# Glimpse function
+glimpse(nyt_titles)
+```
+
+Here we can see that we have the book id, title, author, year and total weeks it stayed as a 'best-seller' book on NYT.
+
+# Exploratory Data Analysis
+
+Distribution of the total weeks a book stays as a 'best-seller' in NYT:
+
+```{r message=FALSE, fig.align = 'center'}
+nyt_titles %>% 
+  ggplot(aes(total_weeks))+
+  geom_histogram()
+```
+
+Obviously is has a exponential distribution, as it gets harder and harder to stay a best selling book. The metrics of total weeks variable can be found below:
+
+```{r}
+summary(nyt_titles$total_weeks)
+```
+
+Let's see the books who stayed the most as a best-seller.
+
+```{r}
+nyt_titles %>% 
+  filter(total_weeks >= 100) %>%
+  arrange(desc(total_weeks)) %>% 
+  select(author, title, total_weeks, year) %>% 
+  top_n(10)
+```
+
+Let's see what authors stayed did the most selling with their books!
+
+```{r}
+nyt_titles %>% 
+  group_by(author) %>% 
+  summarise(n = n(),
+            median_total_weeks = median(total_weeks)) %>% 
+  arrange(-(n))
+```
+
+Danielle Steel, Stuart Woods and Stephen King dominates the pool. Also, notice that the n distribution is probably exponential too.
+
+# Build the model
+
+Let's begin the modelling process, by dividing our training and testing groups. But first we convert the total_weeks variable into two categories:
+
+-   long
+
+-   short based on the logical condition `if_else(total_weeks > 4, true, false)`
+
+```{r message=FALSE}
+library(tidymodels)
+
+set.seed(123)
+book_split <- nyt_titles %>% 
+  transmute(author,
+            total_weeks = if_else(total_weeks > 4, "long", "short")) %>% 
+  na.omit() %>% 
+  initial_split(strata = total_weeks)
+
+# Separating test and training groups
+books_train <- training(book_split)
+books_test <- testing(book_split)
+
+# Doing cross-validation
+book_folds <- vfold_cv(books_train, strata = total_weeks)
+book_folds
+
+
+```
+
+After categorizing the total_weeks variable, we do the training and test group separation using it as a stratification variable.
+
+```{r}
+books_train %>% count(total_weeks)
+```
+
+Next, lets build a workflow with an SVM classification model and tokenization of the authors names. What is wordpiece tokenization? I'm not a text processing expert, so I'm going to just skip any explanations and let the professionals handle it. More can be found [here](https://huggingface.co/docs/transformers/tokenizer_summary#wordpiece).
+
+```{r}
+library(textrecipes)
+
+# Creating the specification of the model
+svm_spec <- svm_linear(mode = "classification")
+
+# Creating the recipe for pre-processing the data
+books_recipe <- recipe(total_weeks ~ author, data = books_train) %>% 
+  step_tokenize_wordpiece(author, max_chars = 10) %>% 
+  step_tokenfilter(author, max_tokens = 100) %>% 
+  step_tf(author) %>% 
+  step_normalize(all_numeric_predictors())
+
+# Just to take a glimpse
+prep(books_recipe) %>% bake(new_data = NULL) %>% glimpse()
+```
+
+Now we just need to finish the workflow:
+
+```{r}
+book_wf <- workflow(preprocessor = books_recipe, spec = svm_spec)
+book_wf
+```
+
+# Evaluate and finalize model
+
+Now what we need to do is to specify the metrics and fit the resamples of training data.
+
+```{r}
+# Do paralel processing
+doParallel::registerDoParallel()
+
+# Register the metrics we want to evaluate
+set.seed(123)
+book_metrics <- metric_set(sens, accuracy, spec)
+book_rs <- fit_resamples(book_wf, resamples = book_folds, metrics = book_metrics)
+
+# We now collect the metrics
+collect_metrics(book_rs)
+```
+
+Now we just need to do a final fit into the **training data** and test it into the testing data. For this, we use the `function last_fit()`
+
+```{r}
+book_last_fit <- last_fit(book_wf, split = book_split, metrics = book_metrics)
+book_lf_metrics <- collect_metrics(book_last_fit)
+
+# Seeing the confusion matrix
+collect_predictions(book_last_fit) %>% 
+  conf_mat(.pred_class, total_weeks)
+```
+
+If we think our model is already ok, we can extract ou final model with the function `extract_workflow()`:
+
+```{r}
+# Extracting the final model
+final_svm_model <- extract_workflow(book_last_fit)
+
+# Testing into (possible) new data
+augment(final_svm_model, new_data = slice_sample(books_test, n = 2))
+```
+
+We can algo evaluate what are most important coefficients since this is a Linear Support Vector Machine:
+
+```{r}
+tidy(final_svm_model) %>% 
+  slice_max(abs(estimate), n = 15) %>% 
+  mutate(term = str_remove_all(term, "tf_author_")) %>% 
+  mutate(term = fct_reorder(term, abs(estimate))) %>% 
+  ggplot(aes(x = abs(estimate), y = term, fill = estimate > 0))+
+  geom_col()+
+  scale_fill_discrete(labels = c("Fewer Weeks", "More Weeks"))+
+  labs(fill = "How many weeks on \nbest seller NYT list", 
+       y = "Associated Author 'term'", 
+       x = "Estimate from SVM Linear Model",
+       title = "Final SVM Linear Wordpiece Model")+
+  theme_minimal()
+```
+
+# About
+
+```{r}
+sessioninfo::package_info()
+```

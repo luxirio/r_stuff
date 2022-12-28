@@ -1,0 +1,163 @@
+---
+title: "tidytuesday_13"
+author: "Gustavo"
+date: "2022-12-27"
+output: 
+  html_document:
+  toc: true
+  theme: journal
+  fontsize: 15
+  highlight: pygments
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", message = FALSE)
+```
+
+# Collegiate Sports in the US
+
+The data this week comes from Equity in Athletics Data Analysis, hattip to Data is Plural, and more can be found on the [TidyTuesday website](https://github.com/rfordatascience/tidytuesday/blob/master/data/2022/2022-03-29/readme.md).
+
+We're gonna begin by loading the data, since it is already clean. The main goal here is to do some exploratory analysis.
+
+```{r}
+library(tidyverse)
+sports_raw <- read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-03-29/sports.csv')
+```
+
+First, we can combine some of the sports to make our life easier in the future.
+
+Before sparsing the data:
+
+```{r}
+unique(sports_raw$sports)
+```
+
+After sparsing the data:
+
+```{r}
+sports_parsed <- sports_raw %>% 
+  mutate(sports = case_when(
+    str_detect(sports, "Swimming") ~ "Swimming and Diving", 
+    str_detect(sports, "Swimming") ~ "Swimming and Diving",
+    str_detect(sports, "Track") ~ "Track",
+    TRUE ~ sports))
+
+unique(sports_parsed$sports)
+```
+
+The sports contemplated in this dataset as its popularity (number of rows) can be found below. Since it is a USA data, makes sense that basketball is the main sport contemplated in this dataset, followed by volleyball, soccer and baseball.
+
+```{r}
+sports_raw %>% 
+  group_by(sports) %>%
+  summarise(n = n()) %>% 
+  arrange(desc(n))
+```
+
+We're gonna use `bind_rows()` function to create a new dataset with only some variables of interest.
+
+```{r}
+sports <- bind_rows(
+  sports_parsed %>% 
+    select(year, institution_name, sports, 
+           participants = partic_men, 
+           revenue = rev_men, 
+           expenditure = exp_men) %>% 
+    mutate(gender = "men"),
+  sports_parsed %>% 
+    select(year, institution_name, sports, 
+           participants = partic_women, 
+           revenue = rev_women, 
+           expenditure = exp_women) %>% 
+    mutate(gender = "women")) %>% 
+  na.omit()
+
+head(sports)
+```
+
+Let's do a beautiful plot:
+
+```{r fig.height= 12, fig.width= 8}
+sports %>% 
+  mutate(sports = fct_reorder(sports, expenditure)) %>% 
+  ggplot(aes(x = expenditure, y = sports, color = gender, fill = gender))+
+  geom_boxplot(position = position_dodge(preserve = "single"), alpha = 0.2)+
+  scale_x_log10(labels = scales::dollar)+
+  theme_minimal()+
+  theme(legend.position = "top", text = element_text(face = "bold"))+
+  guides(fill = "none")+
+  labs(x = "Expenditures by team", y = "", color = "Gender", fill = NULL)
+```
+
+Big gap difference specially in football and basketball (also in beach volley) when we account for gender. Now, following the screencast, we're going to do a multiple linear regression accounting for sports and ignoring sports for predicting expenditures by team.
+
+# Linear models
+
+Julia suggests we use a more 'R base' approach in order to build the models. So we go on:
+
+```{r}
+ignore_sport <- lm(expenditure ~ gender + participants, data = sports)
+account_for_sport <- lm(expenditure ~ gender + participants + sports, data = sports)
+```
+
+```{r}
+library(broom)
+
+bind_rows(
+  tidy(ignore_sport) %>% mutate(sports = "ignore"),
+  tidy(account_for_sport) %>%  mutate(sports = "account for sport")
+) %>% 
+  filter(!str_detect(term, "sports"), term != "(Intercept)") %>% 
+  ggplot(aes(estimate, term, color = sports))+
+  geom_vline(xintercept = 0.0, colour = "gray", lty = 5, size = 1.5)+
+  geom_errorbar(aes(xmin = estimate - 1.96*std.error, xmax = estimate + 1.96*std.error), size = 1, alpha = 0.5)+
+  scale_x_continuous(labels = scales::dollar)+
+  theme_minimal()+
+  theme(legend.position = "bottom", text = element_text(size = 14), title = element_text(size = 15, face = "bold"))+
+  labs(y = NULL, color = "Account for sports?", x = "Mean change in expenditures", title = "Expenditures on college sports (USA)", subtitle = "linear models considering or not the sports")
+```
+
+# Bootstrap
+
+We can use another statistical approach for estimating the intervals of the models using bootstrapping of the sample and estimating. One can use the `reg_intervals()` function part of the `rsample` library. Since this is a stochastic process, we need to set a seed using `set.seed()` for the pseudo-random bootstrapping of samples.
+
+```{r}
+library(rsample)
+
+doParallel::registerDoParallel()
+
+set.seed(123)
+ignore_intervals <-
+  reg_intervals(expenditure ~ gender + participants, data = sports, times = 500)
+
+account_for_sport_intervals <-
+  reg_intervals(expenditure ~ gender + participants + sports, data = sports, times = 500)
+
+```
+
+How does the output look? What are the coefficients when we consider the sports?
+
+```{r}
+bind_rows(
+  ignore_intervals %>% 
+    mutate(sports = "ignore"),
+  account_for_sport_intervals %>% 
+    filter(!str_detect(term,"sports")) %>% 
+    mutate(sports = "account")
+) %>% 
+  ggplot(aes(.estimate, term, color = sports))+
+  geom_vline(xintercept = 0, color = "gray", lty = 5, size = 1.4)+
+  geom_errorbar(aes(xmin = .lower, xmax = .upper), size = 1.4, alpha = 0.5)+
+  scale_x_continuous(labels = scales::dollar)+
+  theme_minimal()+
+  theme(text = element_text(size = 14), 
+        title = element_text(face = "bold"), 
+        legend.position = "bottom")+
+  labs(y = NULL, x = "Coefficient estimate", 
+       title = "Bootstrap linear models ", 
+       subtitle = "accounting or not for sports in USA college sports", 
+       color = "Account for sports?")
+```
+
+Well, unsurprisingly we got the same results but using bootstrapping of linear model coefficients. We can see that when we account for sports, the estimate of expenditures mean change considering only gender, i.e the coefficient **"genderwomen"** in this model passes through zero, that is, is not significant. But when we ignore the sports, there is a big difference.

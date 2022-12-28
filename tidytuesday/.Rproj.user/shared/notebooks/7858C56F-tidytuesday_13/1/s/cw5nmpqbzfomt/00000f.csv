@@ -1,0 +1,2 @@
+"0","library(tidyverse)"
+"0","sports_raw <- read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-03-29/sports.csv')"

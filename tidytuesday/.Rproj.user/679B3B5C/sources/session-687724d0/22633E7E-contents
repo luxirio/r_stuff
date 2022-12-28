@@ -1,0 +1,204 @@
+---
+title: "tidytuesday_4"
+author: "Gustavo"
+date: "2022-12-27"
+output: 
+  html_document:
+    toc: true
+    theme: journal
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', message = FALSE, warning = FALSE)
+```
+
+# Board Games
+
+This week #TidyTuesday *dataset* is about board games! I do some board gaming with some friends and we usually play some Catan, Carcassonne, Stone Age, Harbour, and other games. I'm really excited to do some analysis in this dataset and I hope I see some of the games I like to play and even acknowledge some other ones that I didn't know about.
+
+Okay, so first we need to load the data and join the two pieces of data into only one data frame.
+
+```{r}
+# We load the tidyverse library
+library(tidyverse)
+
+# We load both the datasets, with the ratings and details
+ratings <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-01-25/ratings.csv")
+details <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-01-25/details.csv")
+
+# Merging the two datasets by "id"
+ratings_joined <- 
+  ratings %>% 
+  left_join(details, by = "id")
+```
+
+There are a lot of columns such as the 'url' that contains only the url with the logo of the game, and we are mainly not interested in it. Usually we'd just select those before we even begin to explore data. That's a good practice when dealing with median/large datasets.
+
+# Exploratory Data Analysis (EDA)
+
+One of the main ideas is to predict ratings based on other variables, or even understand what variables are related to the final rate of the game.
+
+We can begin very simple, just plotting the histogram of the ratings:
+
+```{r}
+ratings_joined %>% 
+  ggplot(aes(average))+
+  geom_histogram(bins = 40, color = "brown", fill = "beige")+
+  labs(x = "Average rating", y = "", title = "Game rating distribution")+
+  theme_minimal()+
+  theme(text = element_text(size = 14),
+        title = element_text(size = 16, face = "bold"),
+        plot.title =  element_text(size = 25, face = "bold", hjust = 0.5))
+```
+
+We can see that the average rating of the games in this dataset follows closely a normal distribution and it is expected. Now let's see what some variables such as 'minage' or 'maxplayers' is related to the ratings prior of build any model. Drawing some plots:
+
+```{r fig.width= 8, fig.height= 6}
+ratings_joined %>% 
+  filter(!is.na(minage)) %>% 
+  mutate(minage = cut_number(minage, 4)) %>%
+  ggplot(aes(x = minage, y = average, color = minage, fill = minage))+
+  geom_boxplot(show.legend = FALSE, alpha = 0.6)+
+  theme_minimal()+
+  labs(x = "Minimum age for playing the game",
+       y = "Average ratings")+
+  theme(text = element_text(size = 13),
+        title = element_text(size = 14, face = "bold"))
+  
+```
+
+Now for the 'playing time' variable:
+
+```{r fig.width= 8, fig.height= 6}
+ratings_joined %>% 
+  filter(!is.na(playingtime)) %>% 
+  mutate(playingtime = cut_number(playingtime, 4)) %>%
+  ggplot(aes(x = playingtime, y = average, color = playingtime, fill = playingtime))+
+  geom_boxplot(show.legend = FALSE, alpha = 0.6)+
+  theme_minimal()+
+  labs(x = "Playing time",
+       y = "Average ratings")+
+  theme(text = element_text(size = 13),
+        title = element_text(size = 14, face = "bold"))
+  
+```
+
+We can see the exactly same trend: as the minumum age and playing time increases the average ratings for that specific game increases rather slightly. 
+
+We can proceed to build the models.
+
+# Prep the data
+I decided to try and apply some simple linear regression models so we can compare aftwards with the XGBoost models.
+
+But first, we need to pre-process the data. I'm applying the same concepts of Julia Silge's on her analysis. Our 'data-budget' is only the name, average, the variables maching "min|max" regex and boardgamecategory which is going to give us a lot of work to feature engineer it.
+
+```{r}
+library(tidymodels)
+
+set.seed(123)
+
+#Splitting the training and test datasets
+game_split <-
+  ratings_joined %>% 
+  select(name, average, matches("min|max"), boardgamecategory) %>% 
+  na.omit() %>% 
+  initial_split(strata = average)
+game_train <- training(game_split)
+game_test <- testing(game_split)
+
+
+# Doing the k-fold division with k = 10
+set.seed(234)
+game_folds <- vfold_cv(game_train, v = 10, strata = average)
+```
+
+Now she does this feature engineering using `textrecipes` and a customized function `split_category()`. After that ou work is done with pre-processing the *dataset*.
+```{r}
+library(textrecipes)
+
+# Customized function to split the strings, remove all punctuation
+## squish (trim), string to lower and replace all blank spaces with _
+split_category <- function(x){
+  x %>% 
+    str_split(", ") %>% 
+    map(str_remove_all, "[:punct:]") %>%
+    map(str_squish) %>% 
+    map(str_to_lower) %>% 
+    map(str_replace_all, " ", "_")
+  
+}
+
+games_rec <- recipe(average ~., data = game_train) %>% 
+  update_role(name, new_role = "id") %>% 
+  step_tokenize(boardgamecategory, custom_token = split_category) %>% 
+  step_tokenfilter(boardgamecategory, max_tokens = 30) %>% 
+  step_tf(boardgamecategory)
+
+# Just to check
+game_prep <- prep(games_rec)
+bake(game_prep, new_data = NULL) %>%  str()
+```
+# Multiple Linear Regression Models
+
+Specifying the linear regression:
+
+```{r fig.height= 8, fig.align='center', fig.width=10}
+
+# The recipe
+reg_recipe <- recipe(average~., data = game_train) %>% 
+  update_role(name, new_role = "id") %>% 
+  step_tokenize(boardgamecategory, custom_token = split_category) %>% 
+  step_tokenfilter(boardgamecategory, max_tokens = 30) %>% 
+  step_tf(boardgamecategory)
+
+# Specifying the linear regression
+reg_spec <- linear_reg(mode = "regression", engine = "lm") 
+
+# Doing the Workflow
+reg_wf <- workflow() %>% 
+  add_model(reg_spec)%>% 
+  add_recipe(reg_recipe) 
+
+# Setting the metrics
+set.seed(123)
+linear_metrics <- metric_set(rmse, rsq, ccc)
+
+# Doing the fit into the training data
+reg_fit <- reg_wf %>% 
+    last_fit(split = game_split, metrics = linear_metrics)
+
+# Collecting the metrics
+collect_metrics(reg_fit, mlinear_metrics)
+
+# Collecting the test prediction
+reg_test_predictions <- collect_predictions(reg_fit)
+
+reg_test_predictions %>% 
+  ggplot(aes(.pred, average))+
+  geom_point(size = 2, alpha = 0.2)+
+  geom_abline(intercept = 0, slope = 1, lty = 5, colour = "gray")+
+  coord_obs_pred()+
+  theme_minimal()
+```
+We can also see the training dataset predictions
+```{r}
+# Baking our dataset training
+training_baked <- reg_recipe %>% 
+  prep() %>% 
+  bake(new_data = game_train)
+
+# Fitting the model into our training data
+reg_training_fit <- reg_spec %>% 
+  fit(average ~., data = training_baked)
+
+tidy(reg_training_fit)
+```
+
+
+# XGBoost Models
+
+
+
+
+

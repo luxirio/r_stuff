@@ -1,0 +1,8 @@
+"0","# Baking our dataset training"
+"0","training_baked <- reg_recipe %>% "
+"0","  prep() %>% "
+"0","  bake(new_data = game_train)"
+"0",""
+"0","# Fitting the model into our training data"
+"0","reg_training_fit <- reg_spec %>% "
+"0","  fit(average ~., data = training_baked)"

@@ -1,0 +1,8 @@
+"0","ratings_joined %>% "
+"0","  ggplot(aes(average))+"
+"0","  geom_histogram(bins = 40, color = ""brown"", fill = ""beige"")+"
+"0","  labs(x = ""Average rating"", y = """", title = ""Game rating distribution"")+"
+"0","  theme_minimal()+"
+"0","  theme(text = element_text(size = 14),"
+"0","        title = element_text(size = 16, face = ""bold""),"
+"0","        plot.title =  element_text(size = 25, face = ""bold"", hjust = 0.5))"
